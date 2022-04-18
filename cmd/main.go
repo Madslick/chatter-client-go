@@ -84,6 +84,8 @@ func main() {
 	var serverConnection string
 	flag.StringVar(&serverConnection, "s", "chit-chat-go:3000", "The host:port to connect to the server")
 
+	flag.Parse()
+
 	// 2. Start Connection
 	// 3. Start Stream
 	err := connect(serverConnection)
