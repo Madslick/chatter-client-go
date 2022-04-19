@@ -73,6 +73,7 @@ func login() error {
 	if login := loginResponse.GetLogin(); login != nil {
 		chatClient.ClientId = login.GetClientId()
 	}
+	log.Println("Type '/w <name>' to send someone a message")
 
 	return nil
 }
@@ -173,7 +174,10 @@ func main() {
 
 				if err != nil {
 					log.Fatal("Unable to create conversation, error returned from server: ", err)
+					continue
 				}
+
+				log.Println("Now chatting:", targetName)
 
 				conversation = pkg.Conversation{
 					Id:      conversationResponse.GetId(),
