@@ -106,25 +106,6 @@ func main() {
 	// 5. Start Goroutines for input/output
 	waitc := make(chan struct{})
 
-	// log.Println("Who do you wanna call?")
-	// mainScanner.Scan()
-	// memberName := strings.TrimSpace(mainScanner.Text())
-
-	// conversationResponse, err := client.CreateConversation(
-	// 	ctx,
-	// 	&pkg.ConversationRequest{
-	// 		Members: []*pkg.Client{chatClient, &pkg.Client{Name: memberName}},
-	// 	})
-
-	// if err != nil {
-	// 	log.Fatal("Unable to create conversation, error returned from server: ", err)
-	// }
-
-	// conversation := pkg.Conversation{
-	// 	Id:      conversationResponse.GetId(),
-	// 	Members: conversationResponse.GetMembers(),
-	// }
-
 	// Receiving message from server
 	go func() {
 		for {
