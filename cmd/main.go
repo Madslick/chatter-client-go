@@ -6,10 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -32,7 +32,7 @@ func connect(connectionString string) error {
 	var err error
 	connection, err = grpc.DialContext(ctx, connectionString, grpc.WithInsecure())
 	if err != nil {
-		log.Fatal("Error occurred while connecting to server", err)
+		fmt.Printf("Error occurred while connecting to server %s\n", err)
 		return err
 	}
 
@@ -46,16 +46,15 @@ func startStream() error {
 	var err error
 	stream, err = chatClient.Converse(context.Background())
 	if err != nil {
-		log.Fatal("Error occurred while starting the bi-directional stream with the server", err)
+		fmt.Printf("Error occurred while starting the bi-directional stream with the server %s\n", err)
 		return err
 	}
-	log.Println("Stream Started")
 	return nil
 }
 
 func login() error {
 
-	log.Printf("Registering Stream with %s %s\n", me.GetName(), me.GetClientId())
+	fmt.Printf("Registering Stream with %s %s\n", me.GetName(), me.GetClientId())
 	loginEvent := pkg.ChatEvent{
 		Command: &pkg.ChatEvent_Login{
 			Login: me,
@@ -63,21 +62,20 @@ func login() error {
 	}
 	sendErr := stream.Send(&loginEvent)
 	if sendErr != nil {
-		log.Fatalf("Failed to send message to server: %v", sendErr)
+		fmt.Printf("Failed to send message to server: %v\n", sendErr)
 		return sendErr
 	}
 
 	// Receive Login Response
-	loginResponse, err := stream.Recv()
+	_, err := stream.Recv()
 	if err != nil {
-		log.Fatalf("Failed to login to server: %s", err)
+		fmt.Printf("Failed to login to server: %v\n", err)
 		return err
 	}
 
-	if login := loginResponse.GetLogin(); login != nil {
-		me.ClientId = login.GetClientId()
-	}
-	fmt.Println("Type '/w <name>' to send someone a message")
+	// if login := loginResponse.GetLogin(); login != nil {
+	// 	me.ClientId = login.GetClientId()
+	// }
 
 	return nil
 }
@@ -112,19 +110,76 @@ func authenticate() {
 		},
 	)
 	if err != nil {
-		log.Fatalf("Problem signing in: %s", err)
+		fmt.Printf("Problem signing in: %v\n", err)
 		authenticate()
+		return
 	}
 	me = &pkg.Client{
 		ClientId: response.GetId(),
 		Name:     response.GetFirstName(),
 	}
 
-	log.Printf("Hello %s, your ClientId is %s\n", me.Name, me.ClientId)
+	fmt.Printf("Hello %s, your ClientId is %s\n", me.Name, me.ClientId)
 }
 
 func signup() {
 
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Printf("Enter Email: ")
+	scanner.Scan()
+	email := strings.TrimSpace(scanner.Text())
+
+	fmt.Printf("Enter Password: ")
+	scanner.Scan()
+	password := strings.TrimSpace(scanner.Text())
+
+	fmt.Printf("Enter First Name: ")
+	scanner.Scan()
+	first := strings.TrimSpace(scanner.Text())
+
+	fmt.Printf("Enter Last Name: ")
+	scanner.Scan()
+	last := strings.TrimSpace(scanner.Text())
+
+	fmt.Printf("Enter Phone Number: ")
+	scanner.Scan()
+	phone := strings.TrimSpace(scanner.Text())
+
+	response, err := authClient.SignUp(
+		context.TODO(),
+		&pkg.SignUpRequest{
+			Email:       email,
+			Password:    password,
+			FirstName:   first,
+			LastName:    last,
+			PhoneNumber: phone,
+		},
+	)
+
+	if err != nil {
+		fmt.Printf("Unable to signup new user. Error: %v\n", err)
+		signup()
+		return
+	}
+
+	fmt.Printf("New user created with Id %s\n", response.GetId())
+	mainMenu()
+}
+
+func searchAccounts(query string) ([]*pkg.Account, error) {
+	searchResponse, err := authClient.SearchAccounts(
+		context.TODO(),
+		&pkg.SearchAccountsRequest{
+			SearchQuery: query,
+			Page:        0,
+			Size:        5,
+		},
+	)
+	if err != nil {
+		fmt.Printf("Error searching accounts with %s. Error: %v\n", query, err)
+		return nil, err
+	}
+	return searchResponse.GetMembers(), nil
 }
 
 func main() {
@@ -139,7 +194,7 @@ func main() {
 
 	err := connect(serverConnection)
 	if err != nil {
-		log.Fatal("Unable to setup the connection. Exiting")
+		fmt.Printf("Unable to setup the connection. Exiting\n")
 		os.Exit(1)
 	}
 	defer connection.Close()
@@ -151,7 +206,7 @@ func main() {
 
 	// 4. Login
 	if err := login(); err != nil {
-		log.Fatal("Error while logging in to register a chat stream", err)
+		fmt.Printf("Error while logging in to register a chat stream. %v\n", err)
 		os.Exit(1)
 	}
 	defer stream.CloseSend()
@@ -168,13 +223,14 @@ func main() {
 				return
 			}
 			if err != nil {
-				log.Fatalf("Failed to receive a note : %v", err)
+				fmt.Printf("Failed to receive a note : %v\n", err)
+				panic(err)
 			}
 
 			if login := in.GetLogin(); login != nil {
-				log.Println(login.GetName(), "logged in")
+				fmt.Println(login.GetName(), "logged in")
 			} else if message := in.GetMessage(); message != nil {
-				log.Println(message.GetFrom().GetName(), ":", message.GetContent())
+				fmt.Println(message.GetFrom().GetName(), ":", message.GetContent())
 			}
 		}
 	}()
@@ -183,6 +239,7 @@ func main() {
 	go func() {
 		var conversation pkg.Conversation
 
+		regex, _ := regexp.Compile("^/search ")
 		messageScanner := bufio.NewScanner(os.Stdin)
 		for messageScanner.Scan() {
 			text := strings.TrimSpace(messageScanner.Text())
@@ -190,28 +247,45 @@ func main() {
 				continue
 			}
 
-			matched, err := regexp.MatchString("^/w ", text)
-			if err != nil {
-				log.Fatal("Something wrong with the regex dude")
-				continue
-			}
+			matched := regex.MatchString(text)
 
 			if matched {
 				textSplit := strings.Split(text, " ")
-				targetName := textSplit[1]
+				query := textSplit[1]
+
+				accounts, searchError := searchAccounts(query)
+				if searchError != nil {
+					panic(searchError)
+				}
+
+				fmt.Printf("Select the user or 0 for more results\n")
+				for index, acc := range accounts {
+					fmt.Printf("%d - %s %s\n", index+1, acc.FirstName, acc.LastName)
+				}
+				messageScanner.Scan()
+				personIndexStr := strings.TrimSpace(messageScanner.Text())
+				personIndex, _ := strconv.Atoi(personIndexStr)
+				selectedAccount := accounts[personIndex-1]
+				fmt.Printf("You selected %s\n", selectedAccount.FirstName)
 
 				conversationResponse, err := chatClient.CreateConversation(
 					ctx,
 					&pkg.ConversationRequest{
-						Members: []*pkg.Client{me, &pkg.Client{Name: targetName}},
+						Members: []*pkg.Client{
+							me,
+							&pkg.Client{
+								ClientId: selectedAccount.Id,
+								Name:     selectedAccount.FirstName,
+							},
+						},
 					})
 
 				if err != nil {
-					log.Fatal("Unable to create conversation, error returned from server: ", err)
+					fmt.Printf("Unable to create conversation, error returned from server: %v\n", err)
 					continue
 				}
 
-				log.Println("Now chatting:", targetName)
+				fmt.Println("Now chatting:", selectedAccount.FirstName)
 
 				conversation = pkg.Conversation{
 					Id:      conversationResponse.GetId(),
@@ -230,7 +304,7 @@ func main() {
 				Command: &pkg.ChatEvent_Message{Message: &message},
 			})
 			if err != nil {
-				log.Fatalf("Failed to send message to server: %v", err)
+				fmt.Printf("Failed to send message to server: %v\n", err)
 			}
 		}
 	}()
@@ -247,5 +321,5 @@ loop:
 			break loop
 		}
 	}
-	log.Println("chatClient exited")
+	fmt.Println("chatClient exited")
 }
