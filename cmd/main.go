@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -12,16 +13,17 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Madslick/chit-chat-go/pkg"
+	"github.com/Madslick/chit-chat-go-client/pkg"
 	"google.golang.org/grpc"
 )
 
 var ctx context.Context
 var connection *grpc.ClientConn
-var client pkg.ChatroomClient
+var chatClient pkg.ChatroomClient
+var authClient pkg.AuthClient
 var stream pkg.Chatroom_ConverseClient
 
-var chatClient *pkg.Client
+var me *pkg.Client
 
 func connect(connectionString string) error {
 	//ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -34,27 +36,29 @@ func connect(connectionString string) error {
 		return err
 	}
 
-	client = pkg.NewChatroomClient(connection)
-	stream, err = client.Converse(context.Background())
-	if err != nil {
-		log.Fatal("Error occurred while starting the bi-directional stream with the server", err)
-		return err
-	}
+	chatClient = pkg.NewChatroomClient(connection)
+	authClient = pkg.NewAuthClient(connection)
 
 	return nil
 }
 
-func login() error {
-	log.Println("Who are you?")
-	loginScanner := bufio.NewScanner(os.Stdin)
-	loginScanner.Scan()
-	name := strings.TrimSpace(loginScanner.Text())
+func startStream() error {
+	var err error
+	stream, err = chatClient.Converse(context.Background())
+	if err != nil {
+		log.Fatal("Error occurred while starting the bi-directional stream with the server", err)
+		return err
+	}
+	log.Println("Stream Started")
+	return nil
+}
 
-	// Send Login over to server
-	chatClient = &pkg.Client{Name: name}
+func login() error {
+
+	log.Printf("Registering Stream with %s %s\n", me.GetName(), me.GetClientId())
 	loginEvent := pkg.ChatEvent{
 		Command: &pkg.ChatEvent_Login{
-			Login: chatClient,
+			Login: me,
 		},
 	}
 	sendErr := stream.Send(&loginEvent)
@@ -66,16 +70,61 @@ func login() error {
 	// Receive Login Response
 	loginResponse, err := stream.Recv()
 	if err != nil {
-		log.Fatalf("Failed to login to server")
+		log.Fatalf("Failed to login to server: %s", err)
 		return err
 	}
 
 	if login := loginResponse.GetLogin(); login != nil {
-		chatClient.ClientId = login.GetClientId()
+		me.ClientId = login.GetClientId()
 	}
-	log.Println("Type '/w <name>' to send someone a message")
+	fmt.Println("Type '/w <name>' to send someone a message")
 
 	return nil
+}
+
+func mainMenu() {
+	fmt.Println("Type 1 to login or 2 to signup")
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	input := strings.TrimSpace(scanner.Text())
+	if input == "1" {
+		authenticate()
+	} else if input == "2" {
+		signup()
+	}
+}
+
+func authenticate() {
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Printf("Enter Email: ")
+	scanner.Scan()
+	email := strings.TrimSpace(scanner.Text())
+
+	fmt.Printf("Enter Password: ")
+	scanner.Scan()
+	password := strings.TrimSpace(scanner.Text())
+
+	response, err := authClient.SignIn(
+		context.TODO(),
+		&pkg.SignInRequest{
+			Email:    email,
+			Password: password,
+		},
+	)
+	if err != nil {
+		log.Fatalf("Problem signing in: %s", err)
+		authenticate()
+	}
+	me = &pkg.Client{
+		ClientId: response.GetId(),
+		Name:     response.GetFirstName(),
+	}
+
+	log.Printf("Hello %s, your ClientId is %s\n", me.Name, me.ClientId)
+}
+
+func signup() {
+
 }
 
 func main() {
@@ -84,24 +133,28 @@ func main() {
 	// 1. Pull Command Line arguments
 	var serverConnection string
 	flag.StringVar(&serverConnection, "s", "chit-chat-go:3000", "The host:port to connect to the server")
-
 	flag.Parse()
 
 	// 2. Start Connection
-	// 3. Start Stream
+
 	err := connect(serverConnection)
 	if err != nil {
-		log.Fatal("Unable to setup the connection & stream. Exiting")
+		log.Fatal("Unable to setup the connection. Exiting")
 		os.Exit(1)
 	}
 	defer connection.Close()
-	defer stream.CloseSend()
+
+	mainMenu()
+
+	// 3. Start Stream
+	startStream()
 
 	// 4. Login
 	if err := login(); err != nil {
 		log.Fatal("Error while logging in to register a chat stream", err)
 		os.Exit(1)
 	}
+	defer stream.CloseSend()
 
 	// 5. Start Goroutines for input/output
 	waitc := make(chan struct{})
@@ -130,9 +183,9 @@ func main() {
 	go func() {
 		var conversation pkg.Conversation
 
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			text := strings.TrimSpace(scanner.Text())
+		messageScanner := bufio.NewScanner(os.Stdin)
+		for messageScanner.Scan() {
+			text := strings.TrimSpace(messageScanner.Text())
 			if text == "" {
 				continue
 			}
@@ -147,10 +200,10 @@ func main() {
 				textSplit := strings.Split(text, " ")
 				targetName := textSplit[1]
 
-				conversationResponse, err := client.CreateConversation(
+				conversationResponse, err := chatClient.CreateConversation(
 					ctx,
 					&pkg.ConversationRequest{
-						Members: []*pkg.Client{chatClient, &pkg.Client{Name: targetName}},
+						Members: []*pkg.Client{me, &pkg.Client{Name: targetName}},
 					})
 
 				if err != nil {
@@ -170,7 +223,7 @@ func main() {
 			// Send a message on the existing Conversation
 			message := pkg.Message{}
 			message.Conversation = &conversation
-			message.From = chatClient
+			message.From = me
 			message.Content = text
 
 			err = stream.Send(&pkg.ChatEvent{
@@ -194,5 +247,5 @@ loop:
 			break loop
 		}
 	}
-	log.Println("client exited")
+	log.Println("chatClient exited")
 }
