@@ -54,7 +54,6 @@ func startStream() error {
 
 func login() error {
 
-	fmt.Printf("Registering Stream with %s %s\n", me.GetName(), me.GetClientId())
 	loginEvent := pkg.ChatEvent{
 		Command: &pkg.ChatEvent_Login{
 			Login: me,
@@ -72,10 +71,6 @@ func login() error {
 		fmt.Printf("Failed to login to server: %v\n", err)
 		return err
 	}
-
-	// if login := loginResponse.GetLogin(); login != nil {
-	// 	me.ClientId = login.GetClientId()
-	// }
 
 	return nil
 }
@@ -224,13 +219,14 @@ func main() {
 			}
 			if err != nil {
 				fmt.Printf("Failed to receive a note : %v\n", err)
-				panic(err)
+				close(waitc)
+				return
 			}
 
 			if login := in.GetLogin(); login != nil {
 				fmt.Println(login.GetName(), "logged in")
 			} else if message := in.GetMessage(); message != nil {
-				fmt.Println(message.GetFrom().GetName(), ":", message.GetContent())
+				fmt.Printf("\nFrom %s: %s\n", message.GetFrom().GetName(), message.GetContent())
 			}
 		}
 	}()
@@ -238,9 +234,11 @@ func main() {
 	// Reading message from stdin and send to server
 	go func() {
 		var conversation pkg.Conversation
+		var recipientName string
 
 		regex, _ := regexp.Compile("^/search ")
 		messageScanner := bufio.NewScanner(os.Stdin)
+
 		for messageScanner.Scan() {
 			text := strings.TrimSpace(messageScanner.Text())
 			if text == "" {
@@ -266,7 +264,7 @@ func main() {
 				personIndexStr := strings.TrimSpace(messageScanner.Text())
 				personIndex, _ := strconv.Atoi(personIndexStr)
 				selectedAccount := accounts[personIndex-1]
-				fmt.Printf("You selected %s\n", selectedAccount.FirstName)
+				recipientName = selectedAccount.FirstName
 
 				conversationResponse, err := chatClient.CreateConversation(
 					ctx,
@@ -285,7 +283,7 @@ func main() {
 					continue
 				}
 
-				fmt.Println("Now chatting:", selectedAccount.FirstName)
+				fmt.Printf("To %s: ", selectedAccount.FirstName)
 
 				conversation = pkg.Conversation{
 					Id:      conversationResponse.GetId(),
@@ -305,6 +303,10 @@ func main() {
 			})
 			if err != nil {
 				fmt.Printf("Failed to send message to server: %v\n", err)
+			}
+
+			if conversation.Id != "" {
+				fmt.Printf("To %s: ", recipientName)
 			}
 		}
 	}()
