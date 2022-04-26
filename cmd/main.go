@@ -7,14 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
-	"regexp"
-	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/abiosoft/ishell/v2"
+	"google.golang.org/grpc"
 
 	"github.com/Madslick/chit-chat-go-client/pkg"
-	"google.golang.org/grpc"
 )
 
 var ctx context.Context
@@ -24,6 +22,8 @@ var authClient pkg.AuthClient
 var stream pkg.Chatroom_ConverseClient
 
 var me *pkg.Client
+var selectedAccount *pkg.Account
+var conversation pkg.Conversation
 
 func connect(connectionString string) error {
 	//ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -75,27 +75,7 @@ func login() error {
 	return nil
 }
 
-func mainMenu() {
-	fmt.Println("Type 1 to login or 2 to signup")
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	input := strings.TrimSpace(scanner.Text())
-	if input == "1" {
-		authenticate()
-	} else if input == "2" {
-		signup()
-	}
-}
-
-func authenticate() {
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Printf("Enter Email: ")
-	scanner.Scan()
-	email := strings.TrimSpace(scanner.Text())
-
-	fmt.Printf("Enter Password: ")
-	scanner.Scan()
-	password := strings.TrimSpace(scanner.Text())
+func authenticate(email string, password string) {
 
 	response, err := authClient.SignIn(
 		context.TODO(),
@@ -106,7 +86,6 @@ func authenticate() {
 	)
 	if err != nil {
 		fmt.Printf("Problem signing in: %v\n", err)
-		authenticate()
 		return
 	}
 	me = &pkg.Client{
@@ -158,7 +137,6 @@ func signup() {
 	}
 
 	fmt.Printf("New user created with Id %s\n", response.GetId())
-	mainMenu()
 }
 
 func searchAccounts(query string) ([]*pkg.Account, error) {
@@ -185,143 +163,152 @@ func main() {
 	flag.StringVar(&serverConnection, "s", "chit-chat-go:3000", "The host:port to connect to the server")
 	flag.Parse()
 
-	// 2. Start Connection
+	shell := ishell.New()
+	shell.Println("Welcome to Chit-Chat-Go. Type help for the available commands")
+	shell.SetMultiChoicePrompt(" >>", " - ")
 
-	err := connect(serverConnection)
-	if err != nil {
-		fmt.Printf("Unable to setup the connection. Exiting\n")
-		os.Exit(1)
-	}
-	defer connection.Close()
+	connect(serverConnection)
 
-	mainMenu()
+	shell.AddCmd(&ishell.Cmd{
+		Name: "login",
+		Func: func(c *ishell.Context) {
+			c.ShowPrompt(false)
+			defer c.ShowPrompt(true)
 
-	// 3. Start Stream
-	startStream()
+			c.Println("Let's simulate login")
 
-	// 4. Login
-	if err := login(); err != nil {
-		fmt.Printf("Error while logging in to register a chat stream. %v\n", err)
-		os.Exit(1)
-	}
-	defer stream.CloseSend()
+			// prompt for input
+			c.Print("Email: ")
+			email := c.ReadLine()
+			c.Print("Password: ")
+			password := c.ReadPassword()
 
-	// 5. Start Goroutines for input/output
-	waitc := make(chan struct{})
+			authenticate(email, password)
 
-	// Receiving message from server
-	go func() {
-		for {
-			in, err := stream.Recv()
-			if err == io.EOF {
-				close(waitc)
+			startStream()
+
+			login()
+		},
+		Help: "simulate a login",
+	})
+
+	shell.AddCmd(&ishell.Cmd{
+		Name: "search",
+		Help: "Search for a user to start a conversation with",
+		Func: func(c *ishell.Context) {
+			c.ShowPrompt(false)
+			defer c.ShowPrompt(true)
+
+			if me.GetClientId() == "" {
+				c.Println("You must login first")
 				return
 			}
+			c.Print("Enter a name to search: ")
+			query := c.ReadLine()
+			accounts, err := searchAccounts(query)
 			if err != nil {
-				fmt.Printf("Failed to receive a note : %v\n", err)
-				close(waitc)
-				return
+				c.Err(err)
 			}
 
-			if login := in.GetLogin(); login != nil {
-				fmt.Println(login.GetName(), "logged in")
-			} else if message := in.GetMessage(); message != nil {
-				fmt.Printf("\nFrom %s: %s\n", message.GetFrom().GetName(), message.GetContent())
-			}
-		}
-	}()
-
-	// Reading message from stdin and send to server
-	go func() {
-		var conversation pkg.Conversation
-		var recipientName string
-
-		regex, _ := regexp.Compile("^/search ")
-		messageScanner := bufio.NewScanner(os.Stdin)
-
-		for messageScanner.Scan() {
-			text := strings.TrimSpace(messageScanner.Text())
-			if text == "" {
-				continue
+			account_names := []string{}
+			for _, account := range accounts {
+				account_names = append(account_names, fmt.Sprintf("%s %s", account.GetFirstName(), account.GetLastName()))
 			}
 
-			matched := regex.MatchString(text)
+			choice := c.MultiChoice(account_names, "One of these people ?")
+			selectedAccount = accounts[choice]
 
-			if matched {
-				textSplit := strings.Split(text, " ")
-				query := textSplit[1]
-
-				accounts, searchError := searchAccounts(query)
-				if searchError != nil {
-					panic(searchError)
-				}
-
-				fmt.Printf("Select the user or 0 for more results\n")
-				for index, acc := range accounts {
-					fmt.Printf("%d - %s %s\n", index+1, acc.FirstName, acc.LastName)
-				}
-				messageScanner.Scan()
-				personIndexStr := strings.TrimSpace(messageScanner.Text())
-				personIndex, _ := strconv.Atoi(personIndexStr)
-				selectedAccount := accounts[personIndex-1]
-				recipientName = selectedAccount.FirstName
-
-				conversationResponse, err := chatClient.CreateConversation(
-					ctx,
-					&pkg.ConversationRequest{
-						Members: []*pkg.Client{
-							me,
-							&pkg.Client{
-								ClientId: selectedAccount.Id,
-								Name:     selectedAccount.FirstName,
-							},
+			conversationResponse, err := chatClient.CreateConversation(
+				ctx,
+				&pkg.ConversationRequest{
+					Members: []*pkg.Client{
+						me,
+						&pkg.Client{
+							ClientId: selectedAccount.Id,
+							Name:     selectedAccount.FirstName,
 						},
-					})
-
-				if err != nil {
-					fmt.Printf("Unable to create conversation, error returned from server: %v\n", err)
-					continue
-				}
-
-				fmt.Printf("To %s: ", selectedAccount.FirstName)
-
-				conversation = pkg.Conversation{
-					Id:      conversationResponse.GetId(),
-					Members: conversationResponse.GetMembers(),
-				}
-				continue
+					},
+				})
+			for _, msg := range conversationResponse.Messages {
+				fmt.Printf("From %s: %s\n", msg.GetFrom().GetName(), msg.GetContent())
 			}
 
-			// Send a message on the existing Conversation
-			message := pkg.Message{}
-			message.Conversation = &conversation
-			message.From = me
-			message.Content = text
-
-			err = stream.Send(&pkg.ChatEvent{
-				Command: &pkg.ChatEvent_Message{Message: &message},
-			})
 			if err != nil {
-				fmt.Printf("Failed to send message to server: %v\n", err)
+				fmt.Printf("Unable to create conversation, error returned from server: %v\n", err)
+				return
 			}
 
-			if conversation.Id != "" {
-				fmt.Printf("To %s: ", recipientName)
+			conversation = pkg.Conversation{
+				Id:      conversationResponse.GetId(),
+				Members: conversationResponse.GetMembers(),
 			}
-		}
-	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+			waitc := make(chan bool)
 
-loop:
-	for {
-		select {
-		case <-waitc:
-			break loop
-		case <-quit:
-			break loop
-		}
-	}
-	fmt.Println("chatClient exited")
+			go func() {
+				for {
+					in, err := stream.Recv()
+					if err == io.EOF {
+						waitc <- true
+						return
+					}
+					if err != nil {
+						fmt.Printf("Failed to receive a note : %v\n", err)
+						waitc <- true
+						return
+					}
+
+					if login := in.GetLogin(); login != nil {
+						c.Println(login.GetName(), "logged in")
+					} else if message := in.GetMessage(); message != nil {
+						c.Printf("\nFrom %s: %s\nTo %s: ", message.GetFrom().GetName(), message.GetContent(), selectedAccount.FirstName)
+					}
+				}
+			}()
+
+			go func() {
+				messageScanner := bufio.NewScanner(os.Stdin)
+				c.Printf("To %s: ", selectedAccount.FirstName)
+				for messageScanner.Scan() {
+					msg := strings.TrimSpace(messageScanner.Text())
+					if msg == "" {
+						continue
+					}
+
+					if msg == "/break" {
+						waitc <- true
+						c.Printf("\nExited Chat.\n")
+						return
+					}
+
+					message := pkg.Message{}
+					message.Conversation = &conversation
+					message.From = me
+					message.Content = msg
+
+					err = stream.Send(&pkg.ChatEvent{
+						Command: &pkg.ChatEvent_Message{Message: &message},
+					})
+					if err != nil {
+						fmt.Printf("Failed to send message to server: %v\n", err)
+					}
+
+					c.Printf("Too %s: ", selectedAccount.FirstName)
+
+				}
+
+			}()
+
+		loop:
+			for {
+				select {
+				case <-waitc:
+					break loop
+				}
+			}
+
+		},
+	})
+
+	shell.Run()
 }
