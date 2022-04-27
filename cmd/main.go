@@ -225,12 +225,14 @@ func main() {
 
 	connect(serverConnection)
 	breakChan := make(chan struct{})
+	selectedAccount = &pkg.Account{}
 
 	shell.AddCmd(&ishell.Cmd{
 		Name: "login",
 		Func: func(c *ishell.Context) {
-			c.ShowPrompt(false)
+			defer setSelectedAccount(pkg.Account{})
 			defer c.ShowPrompt(true)
+			c.ShowPrompt(false)
 
 			// prompt for input
 			c.Print("Email: ")
@@ -246,14 +248,13 @@ func main() {
 
 			go receive(c, breakChan, selectedAccount)
 		},
-		Help: "simulate a login",
+		Help: "Login to chit-chat-go",
 	})
 
 	shell.AddCmd(&ishell.Cmd{
 		Name: "search",
 		Help: "Search for a user to start a conversation with",
 		Func: func(c *ishell.Context) {
-			defer fmt.Println("Search CMD ended.")
 			c.ShowPrompt(false)
 			defer c.ShowPrompt(true)
 
@@ -274,7 +275,7 @@ func main() {
 			}
 
 			choice := c.MultiChoice(account_names, "One of these people ?")
-			selectedAccount = accounts[choice]
+			setSelectedAccount(*accounts[choice])
 
 			conversationResponse, err := chatClient.CreateConversation(
 				ctx,
@@ -305,10 +306,16 @@ func main() {
 
 			<-breakChan
 
-			selectedAccount = nil
-
 		},
 	})
 
 	shell.Run()
+}
+
+func setSelectedAccount(acc pkg.Account) {
+	selectedAccount.Id = acc.GetId()
+	selectedAccount.Email = acc.GetEmail()
+	selectedAccount.FirstName = acc.GetFirstName()
+	selectedAccount.LastName = acc.GetLastName()
+	selectedAccount.PhoneNumber = acc.GetPhoneNumber()
 }
