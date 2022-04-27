@@ -155,7 +155,63 @@ func searchAccounts(query string) ([]*pkg.Account, error) {
 	return searchResponse.GetMembers(), nil
 }
 
+func receive(c *ishell.Context, ch chan struct{}, acc *pkg.Account) {
+	for {
+		in, err := stream.Recv()
+		if err == io.EOF || err != nil {
+			c.Printf("Error receiving data from stream: %s\n", err)
+			ch <- struct{}{}
+			return
+		}
+
+		if login := in.GetLogin(); login != nil {
+			c.Println(login.GetName(), "logged in")
+		} else if message := in.GetMessage(); message != nil {
+			c.Printf("\nFrom %s: %s\n", message.GetFrom().GetName(), message.GetContent())
+			if acc != nil {
+				c.Printf("To %s: ", acc.FirstName)
+			} else {
+				c.Print(">>> ")
+			}
+		}
+	}
+}
+
+func transmit(c *ishell.Context, ch chan struct{}, acc *pkg.Account) {
+	messageScanner := bufio.NewScanner(os.Stdin)
+	c.Printf("To %s: ", acc.FirstName)
+	for messageScanner.Scan() {
+		msg := strings.TrimSpace(messageScanner.Text())
+		if msg == "" {
+			continue
+		}
+
+		if msg == "/break" {
+			ch <- struct{}{}
+			c.Printf("Exited Chat.\n")
+			return
+		}
+
+		message := pkg.Message{}
+		message.Conversation = &conversation
+		message.From = me
+		message.Content = msg
+
+		err := stream.Send(&pkg.ChatEvent{
+			Command: &pkg.ChatEvent_Message{Message: &message},
+		})
+		if err != nil {
+			fmt.Printf("Failed to send message to server: %v\n", err)
+		}
+
+		c.Printf("To %s: ", acc.FirstName)
+
+	}
+
+}
+
 func main() {
+	// Main Function for chit-chat-go
 	ctx = context.TODO()
 
 	// 1. Pull Command Line arguments
@@ -168,14 +224,13 @@ func main() {
 	shell.SetMultiChoicePrompt(" >>", " - ")
 
 	connect(serverConnection)
+	breakChan := make(chan struct{})
 
 	shell.AddCmd(&ishell.Cmd{
 		Name: "login",
 		Func: func(c *ishell.Context) {
 			c.ShowPrompt(false)
 			defer c.ShowPrompt(true)
-
-			c.Println("Let's simulate login")
 
 			// prompt for input
 			c.Print("Email: ")
@@ -188,6 +243,8 @@ func main() {
 			startStream()
 
 			login()
+
+			go receive(c, breakChan, selectedAccount)
 		},
 		Help: "simulate a login",
 	})
@@ -196,6 +253,7 @@ func main() {
 		Name: "search",
 		Help: "Search for a user to start a conversation with",
 		Func: func(c *ishell.Context) {
+			defer fmt.Println("Search CMD ended.")
 			c.ShowPrompt(false)
 			defer c.ShowPrompt(true)
 
@@ -243,69 +301,11 @@ func main() {
 				Members: conversationResponse.GetMembers(),
 			}
 
-			waitc := make(chan bool)
+			go transmit(c, breakChan, selectedAccount)
 
-			go func() {
-				for {
-					in, err := stream.Recv()
-					if err == io.EOF {
-						waitc <- true
-						return
-					}
-					if err != nil {
-						fmt.Printf("Failed to receive a note : %v\n", err)
-						waitc <- true
-						return
-					}
+			<-breakChan
 
-					if login := in.GetLogin(); login != nil {
-						c.Println(login.GetName(), "logged in")
-					} else if message := in.GetMessage(); message != nil {
-						c.Printf("\nFrom %s: %s\nTo %s: ", message.GetFrom().GetName(), message.GetContent(), selectedAccount.FirstName)
-					}
-				}
-			}()
-
-			go func() {
-				messageScanner := bufio.NewScanner(os.Stdin)
-				c.Printf("To %s: ", selectedAccount.FirstName)
-				for messageScanner.Scan() {
-					msg := strings.TrimSpace(messageScanner.Text())
-					if msg == "" {
-						continue
-					}
-
-					if msg == "/break" {
-						waitc <- true
-						c.Printf("\nExited Chat.\n")
-						return
-					}
-
-					message := pkg.Message{}
-					message.Conversation = &conversation
-					message.From = me
-					message.Content = msg
-
-					err = stream.Send(&pkg.ChatEvent{
-						Command: &pkg.ChatEvent_Message{Message: &message},
-					})
-					if err != nil {
-						fmt.Printf("Failed to send message to server: %v\n", err)
-					}
-
-					c.Printf("Too %s: ", selectedAccount.FirstName)
-
-				}
-
-			}()
-
-		loop:
-			for {
-				select {
-				case <-waitc:
-					break loop
-				}
-			}
+			selectedAccount = nil
 
 		},
 	})
