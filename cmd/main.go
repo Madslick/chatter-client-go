@@ -96,28 +96,7 @@ func authenticate(email string, password string) {
 	fmt.Printf("Hello %s, your ClientId is %s\n", me.Name, me.ClientId)
 }
 
-func signup() {
-
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Printf("Enter Email: ")
-	scanner.Scan()
-	email := strings.TrimSpace(scanner.Text())
-
-	fmt.Printf("Enter Password: ")
-	scanner.Scan()
-	password := strings.TrimSpace(scanner.Text())
-
-	fmt.Printf("Enter First Name: ")
-	scanner.Scan()
-	first := strings.TrimSpace(scanner.Text())
-
-	fmt.Printf("Enter Last Name: ")
-	scanner.Scan()
-	last := strings.TrimSpace(scanner.Text())
-
-	fmt.Printf("Enter Phone Number: ")
-	scanner.Scan()
-	phone := strings.TrimSpace(scanner.Text())
+func signup(email string, password string, first string, last string, phone string) error {
 
 	response, err := authClient.SignUp(
 		context.TODO(),
@@ -132,11 +111,11 @@ func signup() {
 
 	if err != nil {
 		fmt.Printf("Unable to signup new user. Error: %v\n", err)
-		signup()
-		return
+		return err
 	}
 
 	fmt.Printf("New user created with Id %s\n", response.GetId())
+	return nil
 }
 
 func searchAccounts(query string) ([]*pkg.Account, error) {
@@ -159,7 +138,7 @@ func receive(c *ishell.Context, ch chan struct{}, acc *pkg.Account) {
 	for {
 		in, err := stream.Recv()
 		if err == io.EOF || err != nil {
-			c.Printf("Error receiving data from stream: %s\n", err)
+			c.Printf("Stream was closed\n>>>")
 			ch <- struct{}{}
 			return
 		}
@@ -226,6 +205,32 @@ func main() {
 	connect(serverConnection)
 	breakChan := make(chan struct{})
 	selectedAccount = &pkg.Account{}
+
+	shell.AddCmd(&ishell.Cmd{
+		Name: "signup",
+		Help: "Signup a new account",
+		Func: func(c *ishell.Context) {
+			defer c.ShowPrompt(true)
+			c.ShowPrompt(false)
+
+			// prompt for input
+			c.Print("Email: ")
+			email := c.ReadLine()
+			c.Print("Password: ")
+			password := c.ReadPassword()
+			c.Print("First Name: ")
+			first := c.ReadLine()
+			c.Print("Last Name: ")
+			last := c.ReadLine()
+			c.Print("Phone Number: ")
+			phone := c.ReadLine()
+
+			if err := signup(email, password, first, last, phone); err != nil {
+				c.Println("[ERROR] Unable to signup user with email ", email)
+			}
+
+		},
+	})
 
 	shell.AddCmd(&ishell.Cmd{
 		Name: "login",
@@ -305,6 +310,18 @@ func main() {
 			go transmit(c, breakChan, selectedAccount)
 
 			<-breakChan
+
+		},
+	})
+
+	shell.AddCmd(&ishell.Cmd{
+		Name: "logout",
+		Help: "Logs current user out",
+		Func: func(c *ishell.Context) {
+			me = &pkg.Client{}
+			if err := stream.CloseSend(); err != nil {
+				c.Println("Error while closing stream, %v", err)
+			}
 
 		},
 	})
